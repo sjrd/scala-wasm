@@ -97,13 +97,17 @@ class WasmBuilder(coreSpec: CoreSpec) {
     import IRTypes._
 
     tpe match {
-      case BooleanType | CharType | ByteType | ShortType | IntType => I32_CONST(0)
-      case LongType                                                => I64_CONST(0L)
-      case FloatType                                               => F32_CONST(0.0f)
-      case DoubleType                                              => F64_CONST(0.0)
-      case AnyType | ClassType(_) | ArrayType(_) | NullType        => REF_NULL(WasmHeapType.None)
+      case BooleanType | CharType | ByteType | ShortType | IntType | UndefType =>
+        I32_CONST(0)
 
-      case NoType | NothingType | StringType | UndefType | _: RecordType =>
+      case LongType   => I64_CONST(0L)
+      case FloatType  => F32_CONST(0.0f)
+      case DoubleType => F64_CONST(0.0)
+
+      case AnyType | ClassType(_) | ArrayType(_) | NullType =>
+        REF_NULL(WasmHeapType.None)
+
+      case NoType | NothingType | StringType | _: RecordType =>
         throw new AssertionError(s"Unexpected type for static variable: ${tpe.show()}")
     }
   }

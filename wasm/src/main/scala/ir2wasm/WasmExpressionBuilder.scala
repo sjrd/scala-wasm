@@ -224,6 +224,9 @@ private class WasmExpressionBuilder private (
              */
             instrs += CALL(WasmFunctionName.box(primType.primRef))
         }
+      case (IRTypes.UndefType, _) =>
+        instrs += DROP
+        instrs += CALL(WasmFunctionName.undef)
       case _ =>
         ()
     }
@@ -800,7 +803,7 @@ private class WasmExpressionBuilder private (
       case IRTrees.DoubleLiteral(v)  => instrs += WasmInstr.F64_CONST(v)
 
       case v: IRTrees.Undefined =>
-        instrs += CALL(WasmFunctionName.undef)
+        instrs += WasmInstr.I32_CONST(0)
       case v: IRTrees.Null =>
         instrs += WasmInstr.REF_NULL(Types.WasmHeapType.None)
 
@@ -1255,8 +1258,12 @@ private class WasmExpressionBuilder private (
               instrs += CALL(WasmFunctionName.doubleToString)
             case IRTypes.DoubleType =>
               instrs += CALL(WasmFunctionName.doubleToString)
-            case IRTypes.NullType | IRTypes.UndefType =>
-              instrs += CALL(WasmFunctionName.jsValueToStringForConcat)
+            case IRTypes.NullType =>
+              instrs += DROP
+              instrs ++= ctx.getConstantStringInstr("null")
+            case IRTypes.UndefType =>
+              instrs += DROP
+              instrs ++= ctx.getConstantStringInstr("undefined")
             case IRTypes.NothingType =>
               () // unreachable
             case IRTypes.NoType =>

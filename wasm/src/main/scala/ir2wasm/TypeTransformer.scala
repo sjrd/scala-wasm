@@ -74,8 +74,10 @@ object TypeTransformer {
         )
       case IRTypes.ClassType(className) => transformClassByName(className)
       case IRTypes.RecordType(fields)   => ???
-      case IRTypes.StringType | IRTypes.UndefType =>
+      case IRTypes.StringType =>
         Types.WasmRefType.any
+      case IRTypes.UndefType =>
+        Types.WasmInt32
       case p: IRTypes.PrimTypeWithRef => transformPrimType(p)
     }
 
