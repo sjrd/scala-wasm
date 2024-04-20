@@ -2,6 +2,26 @@
 
 [![CI](https://github.com/tanishiking/scala-wasm/actions/workflows/ci.yml/badge.svg)](https://github.com/tanishiking/scala-wasm/actions/workflows/ci.yml)
 
+### Run the Reversi demo
+
+Prerequesites: you need Node.js and sbt installed.
+
+To build the reversi, use
+
+```shell
+$ sbt sample/fastLinkJS
+```
+
+To run it:
+
+* Use a recent version of *Chrome* (v124.x should be available for auto-update) -- other browsers don't have the required WebAssembly features yet
+* In Chrome, go to chrome://flags/
+  * Search for "Experimental WebAssembly" and switch it to "Enabled"
+  * You may need to restart
+* Start a local HTTP server in the current directory with `$ npx http-server` (`npx` is installed together with Node.js)
+* Navigate to http://localhost:8080/
+* Enjoy the Reversi demo
+
 ### Prerequisites
 
 This project requires Node.js >= 22, which is available as nightly builds as of this writing.
