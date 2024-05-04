@@ -1,6 +1,8 @@
 package wasm
 package converters
 
+import org.scalajs.ir.UTF8String
+
 import wasm.wasm4s._
 import wasm.wasm4s.Names._
 import wasm.wasm4s.Types._
@@ -478,7 +480,8 @@ object WasmTextWriter {
       appendElement("$" + sanitizeWatIdentifier(name.name))
 
     /** @see https://webassembly.github.io/spec/core/text/values.html#text-id */
-    private def sanitizeWatIdentifier(name: String): String = {
+    private def sanitizeWatIdentifier(encodedName: UTF8String): String = {
+      val name = encodedName.toString()
       if (name.isEmpty) "_"
       else if (name.forall(isValidWatIdentifierChar)) name
       else name.map(c => if (isValidWatIdentifierChar(c)) c else '_').mkString

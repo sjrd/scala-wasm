@@ -266,7 +266,7 @@ class WasmContext(val module: WasmModule) extends TypeDefinableWasmContext {
   def addJSPrivateFieldName(fieldName: IRNames.FieldName): Unit =
     _jsPrivateFieldNames += fieldName
 
-  val exceptionTagName: WasmTagName = WasmTagName("exception")
+  val exceptionTagName: WasmTagName = WasmTagName.fromStr("exception")
 
   private def addHelperImport(
       name: WasmFunctionName,
@@ -276,7 +276,7 @@ class WasmContext(val module: WasmModule) extends TypeDefinableWasmContext {
     val sig = WasmFunctionSignature(params, results)
     val typeName = addFunctionType(sig)
     module.addImport(
-      WasmImport("__scalaJSHelpers", name.name, WasmImportDesc.Func(name, typeName))
+      WasmImport("__scalaJSHelpers", name.name.toString(), WasmImportDesc.Func(name, typeName))
     )
   }
 
@@ -288,7 +288,7 @@ class WasmContext(val module: WasmModule) extends TypeDefinableWasmContext {
     module.addImport(
       WasmImport(
         "__scalaJSHelpers",
-        name.name,
+        name.name.toString(),
         WasmImportDesc.Global(name, typ, isMutable)
       )
     )

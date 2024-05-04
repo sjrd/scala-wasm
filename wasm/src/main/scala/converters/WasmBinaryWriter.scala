@@ -6,7 +6,7 @@ import scala.annotation.tailrec
 import java.io.OutputStream
 import java.io.ByteArrayOutputStream
 
-import org.scalajs.ir.Position
+import org.scalajs.ir.{Position, UTF8String}
 import org.scalajs.linker.backend.javascript.SourceMapWriter
 
 import wasm.wasm4s._
@@ -556,8 +556,10 @@ object WasmBinaryWriter {
     def opt[A](elemOpt: Option[A])(op: A => Unit): Unit =
       vec(elemOpt.toList)(op)
 
-    def name(s: String): Unit = {
-      val utf8 = org.scalajs.ir.UTF8String(s)
+    def name(s: String): Unit =
+      name(UTF8String(s))
+
+    def name(utf8: UTF8String): Unit = {
       val len = utf8.length
       u32(len)
       var i = 0

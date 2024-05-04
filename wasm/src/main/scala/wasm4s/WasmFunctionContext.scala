@@ -5,7 +5,7 @@ import scala.collection.mutable
 import org.scalajs.ir.{Names => IRNames}
 import org.scalajs.ir.{Types => IRTypes}
 import org.scalajs.ir.{Trees => IRTrees}
-import org.scalajs.ir.Position
+import org.scalajs.ir.{Position, UTF8String}
 
 import wasm.wasm4s.Names._
 import wasm.wasm4s.Types.WasmType
@@ -58,7 +58,7 @@ class WasmFunctionContext private (
   }
 
   def addLocal(name: String, typ: WasmType): WasmLocalName =
-    addLocal(WasmLocalName(name), typ)
+    addLocal(WasmLocalName.fromStr(name), typ)
 
   private def addLocal(name: IRNames.LocalName, typ: WasmType): WasmLocalName =
     addLocal(WasmLocalName.fromIR(name), typ)
@@ -95,7 +95,7 @@ class WasmFunctionContext private (
     addLocal(genSyntheticLocalName(), typ)
 
   def genInnerFuncName(): WasmFunctionName = {
-    val innerName = WasmFunctionName(functionName.name + "__c" + innerFuncIdx)
+    val innerName = WasmFunctionName(functionName.name ++ UTF8String("__c" + innerFuncIdx))
     innerFuncIdx += 1
     innerName
   }
@@ -445,7 +445,7 @@ object WasmFunctionContext {
         case Some(captureLikes) =>
           val dataStructTypeName = ctx.getClosureDataStructType(captureLikes.map(_._2))
           val local = WasmLocal(
-            WasmLocalName(captureParamName),
+            WasmLocalName.fromStr(captureParamName),
             Types.WasmRefType(dataStructTypeName),
             isParameter = true
           )

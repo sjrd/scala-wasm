@@ -3,75 +3,99 @@ package wasm.wasm4s
 import org.scalajs.ir.{Names => IRNames}
 import org.scalajs.ir.{Trees => IRTrees}
 import org.scalajs.ir.{Types => IRTypes}
-import wasm.converters.WasmTextWriter
+import org.scalajs.ir.UTF8String
 
 object Names {
+  private def intToUTF8String(value: Int): UTF8String =
+    UTF8String(value.toString())
+
   sealed abstract class WasmName {
-    val name: String
+    val name: UTF8String
   }
 
-  final case class WasmLocalName private (name: String) extends WasmName
+  final case class WasmLocalName private (name: UTF8String) extends WasmName
   object WasmLocalName {
-    def fromIR(name: IRNames.LocalName) = new WasmLocalName(name.nameString)
-    def fromStr(str: String) = new WasmLocalName(str)
-    def synthetic(id: Int) = new WasmLocalName(s"local___$id")
+    def fromIR(name: IRNames.LocalName): WasmLocalName =
+      new WasmLocalName(name.encoded)
 
-    val newTarget = new WasmLocalName("new.target")
-    val receiver = new WasmLocalName("___<this>")
+    def fromStr(str: String): WasmLocalName =
+      new WasmLocalName(UTF8String(str))
+
+    private val localPrefix = UTF8String("local___")
+
+    def synthetic(id: Int): WasmLocalName =
+      new WasmLocalName(localPrefix ++ intToUTF8String(id))
+
+    val newTarget = fromStr("new.target")
+    val receiver = fromStr("___<this>")
   }
 
-  final case class WasmLabelName private (name: String) extends WasmName
+  final case class WasmLabelName private (name: UTF8String) extends WasmName
   object WasmLabelName {
-    def synthetic(id: Int): WasmLabelName = new WasmLabelName(id.toString())
+    def synthetic(id: Int): WasmLabelName = new WasmLabelName(intToUTF8String(id))
   }
 
-  final case class WasmGlobalName private (name: String) extends WasmName
+  final case class WasmGlobalName private (name: UTF8String) extends WasmName
   object WasmGlobalName {
+    private val importedPrefix = UTF8String("imported.")
+    private val modinstancePrefix = UTF8String("modinstance.")
+    private val jsclassPrefix = UTF8String("jsclass.")
+    private val vtablePrefix = UTF8String("vtable.")
+    private val vtableClassPrefix = UTF8String("vtable.L")
+    private val itableClassPrefix = UTF8String("itable.L")
+    private val staticPrefix = UTF8String("static.")
+    private val exportPrefix = UTF8String("export.")
+    private val jsPrivateFieldPrefix = UTF8String("jspfield.")
+
+    private val dot = UTF8String(".")
+
     def forImportedModule(moduleName: String): WasmGlobalName =
-      new WasmGlobalName(s"imported.$moduleName")
+      new WasmGlobalName(importedPrefix ++ UTF8String(moduleName))
 
     def forModuleInstance(className: IRNames.ClassName): WasmGlobalName =
-      new WasmGlobalName(s"modinstace.${className.nameString}")
+      new WasmGlobalName(modinstancePrefix ++ className.encoded)
 
     def forJSClassValue(className: IRNames.ClassName): WasmGlobalName =
-      new WasmGlobalName(s"jsclass.${className.nameString}")
+      new WasmGlobalName(jsclassPrefix ++ className.encoded)
 
     def forVTable(className: IRNames.ClassName): WasmGlobalName =
-      new WasmGlobalName(s"vtable.L${className.nameString}")
+      new WasmGlobalName(vtableClassPrefix ++ className.encoded)
 
     def forVTable(typeRef: IRTypes.NonArrayTypeRef): WasmGlobalName = typeRef match {
-      case typeRef: IRTypes.PrimRef    => new WasmGlobalName(s"vtable.${typeRef.charCode}")
-      case IRTypes.ClassRef(className) => forVTable(className)
+      case typeRef: IRTypes.PrimRef =>
+        new WasmGlobalName(vtablePrefix ++ UTF8String(Array(typeRef.charCode.toByte)))
+      case IRTypes.ClassRef(className) =>
+        forVTable(className)
     }
 
     def forITable(className: IRNames.ClassName): WasmGlobalName =
-      new WasmGlobalName(s"itable.L${className.nameString}")
+      new WasmGlobalName(itableClassPrefix ++ className.encoded)
 
     def forStaticField(fieldName: IRNames.FieldName): WasmGlobalName =
-      new WasmGlobalName(s"static.${fieldName.nameString}")
+      new WasmGlobalName(staticPrefix ++ fieldName.className.encoded ++ dot ++ fieldName.simpleName.encoded)
 
     def forTopLevelExport(exportName: String): WasmGlobalName =
-      new WasmGlobalName(s"export.$exportName")
+      new WasmGlobalName(exportPrefix ++ UTF8String(exportName))
 
     def forJSPrivateField(fieldName: IRNames.FieldName): WasmGlobalName =
-      new WasmGlobalName(s"jspfield.${fieldName.nameString}")
+      new WasmGlobalName(jsPrivateFieldPrefix ++ fieldName.className.encoded ++ dot ++ fieldName.simpleName.encoded)
 
     val stringLiteralCache: WasmGlobalName =
-      new WasmGlobalName("string_literal")
+      new WasmGlobalName(UTF8String("string_literal"))
 
     val arrayClassITable: WasmGlobalName =
-      new WasmGlobalName("itable.A")
+      new WasmGlobalName(UTF8String("itable.A"))
 
     val lastIDHashCode: WasmGlobalName =
-      new WasmGlobalName("lastIDHashCode")
+      new WasmGlobalName(UTF8String("lastIDHashCode"))
 
     val idHashCodeMap: WasmGlobalName =
-      new WasmGlobalName("idHashCodeMap")
+      new WasmGlobalName(UTF8String("idHashCodeMap"))
   }
 
-  final case class WasmFunctionName private (name: String) extends WasmName {
+  final case class WasmFunctionName private (name: UTF8String) extends WasmName {
     def this(namespace: String, simpleName: String) =
-      this(namespace + "#" + simpleName)
+      this(UTF8String(namespace + "#" + simpleName))
   }
 
   object WasmFunctionName {
@@ -139,7 +163,7 @@ object Names {
     val start = new WasmFunctionName("start", "start")
 
     private def helper(name: String): WasmFunctionName =
-      new WasmFunctionName(name)
+      new WasmFunctionName(UTF8String(name))
 
     // JS helpers
 
@@ -269,29 +293,41 @@ object Names {
     val searchReflectiveProxy = helper("searchReflectiveProxy")
   }
 
-  final case class WasmFieldName private (name: String) extends WasmName
+  final case class WasmFieldName private (name: UTF8String) extends WasmName
   object WasmFieldName {
+    private val methodTabelPrefix = UTF8String("m.")
+    private val capturePrefix = UTF8String("c")
+
+    private val dot = UTF8String(".")
+
+    def fromStr(str: String): WasmFieldName =
+      new WasmFieldName(UTF8String(str))
+
     def forClassInstanceField(name: IRNames.FieldName): WasmFieldName =
-      new WasmFieldName(name.nameString)
+      new WasmFieldName(name.className.encoded ++ dot ++ name.simpleName.encoded)
 
     /** For class itable fields, each fields point to an itable of the interfaces */
     def forITable(className: IRNames.ClassName): WasmFieldName =
-      new WasmFieldName(className.nameString)
+      new WasmFieldName(className.encoded)
 
     def forMethodTableEntry(name: IRNames.MethodName): WasmFieldName =
-      new WasmFieldName("m." + name.nameString)
+      new WasmFieldName(methodTabelPrefix ++ encodeMethodName(name))
 
-    def captureParam(i: Int): WasmFieldName = new WasmFieldName("c" + i)
+    private def encodeMethodName(methodName: IRNames.MethodName): UTF8String =
+      UTF8String(methodName.nameString)
 
-    val vtable = new WasmFieldName("vtable")
-    val itable = new WasmFieldName("itable")
-    val itables = new WasmFieldName("itables")
-    val arrayItem = new WasmFieldName("array_item")
-    val arrayField = new WasmFieldName("array_field")
-    val reflectiveProxyField = new WasmFieldName("reflective_proxy_field")
+    def captureParam(i: Int): WasmFieldName =
+      new WasmFieldName(capturePrefix ++ intToUTF8String(i))
+
+    val vtable = fromStr("vtable")
+    val itable = fromStr("itable")
+    val itables = fromStr("itables")
+    val arrayItem = fromStr("array_item")
+    val arrayField = fromStr("array_field")
+    val reflectiveProxyField = fromStr("reflective_proxy_field")
     object reflectiveProxy {
-      val func_name = new WasmFieldName("reflective_proxy_func_name")
-      val func_ref = new WasmFieldName("reflective_proxy_func_ref")
+      val func_name = fromStr("reflective_proxy_func_name")
+      val func_ref = fromStr("reflective_proxy_func_ref")
     }
 
     // Fields of the typeData structs
@@ -302,26 +338,26 @@ object Names {
         * It is only meaningful for primitives and for classes. For array types, they are all 0, as
         * array types compute their `name` from the `name` of their component type.
         */
-      val nameOffset = new WasmFieldName("nameOffset")
+      val nameOffset = fromStr("nameOffset")
 
       /** See `nameOffset`. */
-      val nameSize = new WasmFieldName("nameSize")
+      val nameSize = fromStr("nameSize")
 
       /** See `nameOffset`. */
-      val nameStringIndex = new WasmFieldName("nameStringIndex")
+      val nameStringIndex = fromStr("nameStringIndex")
 
       /** The kind of type data, an `i32`.
         *
         * Possible values are the the `KindX` constants in `EmbeddedConstants`.
         */
-      val kind = new WasmFieldName("kind")
+      val kind = fromStr("kind")
 
       /** A bitset of special (primitive) instance types that are instances of this type, an `i32`.
         *
         * From 0 to 5, the bits correspond to the values returned by the helper `jsValueType`. In
         * addition, bits 6 and 7 represent `char` and `long`, respectively.
         */
-      val specialInstanceTypes = new WasmFieldName("specialInstanceTypes")
+      val specialInstanceTypes = fromStr("specialInstanceTypes")
 
       /** Array of the strict ancestor classes of this class.
         *
@@ -331,7 +367,7 @@ object Names {
         *   - are not themselves (hence the *strict* ancestors),
         *   - have typeData to begin with.
         */
-      val strictAncestors = new WasmFieldName("strictAncestors")
+      val strictAncestors = fromStr("strictAncestors")
 
       /** The typeData of a component of this array type, or `null` if this is not an array type.
         *
@@ -339,7 +375,7 @@ object Names {
         *   - the `componentType` for class `Foo` is `null`,
         *   - the `componentType` for the array type `Array[Foo]` is the `typeData` of `Foo`.
         */
-      val componentType = new WasmFieldName("componentType")
+      val componentType = fromStr("componentType")
 
       /** The name as nullable string (`anyref`), lazily initialized from the nameData.
         *
@@ -355,13 +391,13 @@ object Names {
         *     `"[nested"`, for example `"[[I"` for `Array[Array[Int]]` and `"[[Ljava.lang.String;"`
         *     for `Array[Array[String]]`.
         */
-      val name = new WasmFieldName("name")
+      val name = fromStr("name")
 
       /** The `classOf` value, a nullable `java.lang.Class`, lazily initialized from this typeData.
         *
         * This field is initialized by the `createClassOf` helper.
         */
-      val classOfValue = new WasmFieldName("classOf")
+      val classOfValue = fromStr("classOf")
 
       /** The typeData/vtable of an array of this type, a nullable `typeData`, lazily initialized.
         *
@@ -371,15 +407,15 @@ object Names {
         *   - in the `typeData` of class `Foo`, it contains the `typeData` of `Array[Foo]`,
         *   - in the `typeData` of `Array[Int]`, it contains the `typeData` of `Array[Array[Int]]`.
         */
-      val arrayOf = new WasmFieldName("arrayOf")
+      val arrayOf = fromStr("arrayOf")
 
       /** The function to clone the object of this type, a nullable function reference. This field
         * is instantiated only with the classes that implement java.lang.Cloneable.
         */
-      val cloneFunction = new WasmFieldName("clone")
+      val cloneFunction = fromStr("clone")
 
       /** `isInstance` func ref for top-level JS classes. */
-      val isJSClassInstance = new WasmFieldName("isJSClassInstance")
+      val isJSClassInstance = fromStr("isJSClassInstance")
 
       /** The reflective proxies in this type, used for reflective call on the class at runtime.
         * This field contains an array of reflective proxy structs, where each struct contains the
@@ -388,7 +424,7 @@ object Names {
         *
         * See `genSearchReflectivePRoxy` in `HelperFunctions`
         */
-      val reflectiveProxies = new WasmFieldName("reflectiveProxies")
+      val reflectiveProxies = fromStr("reflectiveProxies")
     }
   }
 
@@ -422,28 +458,36 @@ object Names {
   }
 
   // GC types ====
-  final case class WasmTypeName private (name: String) extends WasmName
+  final case class WasmTypeName private (name: UTF8String) extends WasmName
   object WasmTypeName {
+    def fromStr(str: String): WasmTypeName =
+      new WasmTypeName(UTF8String(str))
+
     object WasmStructTypeName {
+      private val classPrefix = UTF8String("c.L")
+      private val captureDataPrefix = UTF8String("captureData.")
+      private val vtablePrefix = UTF8String("v.")
+      private val itablePrefix = UTF8String("i.")
+
       def forClass(name: IRNames.ClassName): WasmTypeName =
-        new WasmTypeName(s"c.L${name.nameString}")
+        new WasmTypeName(classPrefix ++ name.encoded)
 
       def captureData(index: Int): WasmTypeName =
-        new WasmTypeName(s"captureData.$index")
+        new WasmTypeName(captureDataPrefix ++ intToUTF8String(index))
 
-      val typeData = new WasmTypeName("typeData")
-      val reflectiveProxy = new WasmTypeName("reflective_proxy")
+      val typeData = fromStr("typeData")
+      val reflectiveProxy = fromStr("reflective_proxy")
 
       // Array types -- they extend j.l.Object
-      val BooleanArray = new WasmTypeName("c.AZ")
-      val CharArray = new WasmTypeName("c.AC")
-      val ByteArray = new WasmTypeName("c.AB")
-      val ShortArray = new WasmTypeName("c.AS")
-      val IntArray = new WasmTypeName("c.AI")
-      val LongArray = new WasmTypeName("c.AJ")
-      val FloatArray = new WasmTypeName("c.AF")
-      val DoubleArray = new WasmTypeName("c.AD")
-      val ObjectArray = new WasmTypeName("c.AO")
+      val BooleanArray = fromStr("c.AZ")
+      val CharArray = fromStr("c.AC")
+      val ByteArray = fromStr("c.AB")
+      val ShortArray = fromStr("c.AS")
+      val IntArray = fromStr("c.AI")
+      val LongArray = fromStr("c.AJ")
+      val FloatArray = fromStr("c.AF")
+      val DoubleArray = fromStr("c.AD")
+      val ObjectArray = fromStr("c.AO")
 
       def forArrayClass(arrayTypeRef: IRTypes.ArrayTypeRef): WasmTypeName = {
         if (arrayTypeRef.dimensions > 1) {
@@ -464,27 +508,27 @@ object Names {
       }
 
       def forVTable(className: IRNames.ClassName): WasmTypeName =
-        new WasmTypeName(s"v.${className.nameString}")
+        new WasmTypeName(vtablePrefix ++ className.encoded)
 
       val ObjectVTable: WasmTypeName = forVTable(IRNames.ObjectClass)
 
       def forITable(className: IRNames.ClassName): WasmTypeName =
-        new WasmTypeName(s"i.${className.nameString}")
+        new WasmTypeName(itablePrefix ++ className.encoded)
     }
 
     object WasmArrayTypeName {
-      val typeDataArray = new WasmTypeName("a.typeDataArray")
-      val itables = new WasmTypeName("a.itable")
-      val reflectiveProxies = new WasmTypeName("a.reflectiveProxies")
+      val typeDataArray = fromStr("a.typeDataArray")
+      val itables = fromStr("a.itable")
+      val reflectiveProxies = fromStr("a.reflectiveProxies")
 
       // primitive array types, underlying the Array[T] classes
-      val i8Array = new WasmTypeName("a.i8Array")
-      val i16Array = new WasmTypeName("a.i16Array")
-      val i32Array = new WasmTypeName("a.i32Array")
-      val i64Array = new WasmTypeName("a.i64Array")
-      val f32Array = new WasmTypeName("a.f32Array")
-      val f64Array = new WasmTypeName("a.f64Array")
-      val anyArray = new WasmTypeName("a.anyArray")
+      val i8Array = fromStr("a.i8Array")
+      val i16Array = fromStr("a.i16Array")
+      val i32Array = fromStr("a.i32Array")
+      val i64Array = fromStr("a.i64Array")
+      val f32Array = fromStr("a.f32Array")
+      val f64Array = fromStr("a.f64Array")
+      val anyArray = fromStr("a.anyArray")
 
       def underlyingOf(arrayTypeRef: IRTypes.ArrayTypeRef): WasmTypeName = {
         if (arrayTypeRef.dimensions > 1) {
@@ -506,26 +550,26 @@ object Names {
     }
 
     object WasmFunctionTypeName {
-      def apply(idx: Int): WasmTypeName = new WasmTypeName(s"f.$idx")
+      def apply(idx: Int): WasmTypeName = fromStr(s"f.$idx")
 
-      def rec(idx: Int): WasmTypeName = new WasmTypeName(s"recf.$idx")
+      def rec(idx: Int): WasmTypeName = fromStr(s"recf.$idx")
     }
 
   }
 
-  final case class WasmTagName private (name: String) extends WasmName
+  final case class WasmTagName private (name: UTF8String) extends WasmName
   object WasmTagName {
-    def fromStr(str: String): WasmTagName = new WasmTagName(str)
+    def fromStr(str: String): WasmTagName = new WasmTagName(UTF8String(str))
   }
 
-  final case class WasmDataName private (name: String) extends WasmName
+  final case class WasmDataName private (name: UTF8String) extends WasmName
   object WasmDataName {
-    val string = WasmDataName("string")
+    val string = WasmDataName(UTF8String("string"))
   }
 
-  final case class WasmExportName private (name: String) extends WasmName
+  final case class WasmExportName private (name: UTF8String) extends WasmName
   object WasmExportName {
-    def fromStr(str: String) = new WasmExportName(str)
+    def fromStr(str: String): WasmExportName = new WasmExportName(UTF8String(str))
   }
 
 }
