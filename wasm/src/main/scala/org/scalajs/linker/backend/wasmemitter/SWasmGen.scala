@@ -50,11 +50,10 @@ object SWasmGen {
   }
 
   def genLoadJSConstructor(fb: FunctionBuilder, className: ClassName)(implicit
-      ctx: WasmContext
+      ctx: WasmContext,
+      globalKnowledge: GlobalKnowledge
   ): Unit = {
-    val info = ctx.getClassInfo(className)
-
-    info.jsNativeLoadSpec match {
+    globalKnowledge.getJSNativeLoadSpec(className) match {
       case None =>
         // This is a non-native JS class
         fb += Call(genFunctionID.loadJSClass(className))

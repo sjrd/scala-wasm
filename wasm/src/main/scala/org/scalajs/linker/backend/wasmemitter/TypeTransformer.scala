@@ -19,7 +19,7 @@ object TypeTransformer {
     * @see
     *   https://webassembly.github.io/spec/core/syntax/types.html#result-types
     */
-  def transformResultType(t: Type)(implicit ctx: WasmContext): List[watpe.Type] = {
+  def transformResultType(t: Type)(implicit globalKnowledge: GlobalKnowledge): List[watpe.Type] = {
     t match {
       case NoType      => Nil
       case NothingType => Nil
@@ -32,7 +32,7 @@ object TypeTransformer {
     * This method cannot be used for `void` and `nothing`, since they have no corresponding Wasm
     * value type.
     */
-  def transformType(t: Type)(implicit ctx: WasmContext): watpe.Type = {
+  def transformType(t: Type)(implicit globalKnowledge: GlobalKnowledge): watpe.Type = {
     t match {
       case AnyType => watpe.RefType.anyref
 
@@ -46,11 +46,12 @@ object TypeTransformer {
     }
   }
 
-  def transformClassType(className: ClassName)(implicit ctx: WasmContext): watpe.RefType = {
-    val info = ctx.getClassInfo(className)
-    if (info.isAncestorOfHijackedClass)
+  def transformClassType(
+      className: ClassName
+  )(implicit globalKnowledge: GlobalKnowledge): watpe.RefType = {
+    if (globalKnowledge.isAncestorOfHijackedClass(className))
       watpe.RefType.anyref
-    else if (info.isInterface)
+    else if (globalKnowledge.isInterface(className))
       watpe.RefType.nullable(genTypeID.ObjectStruct)
     else
       watpe.RefType.nullable(genTypeID.forClass(className))

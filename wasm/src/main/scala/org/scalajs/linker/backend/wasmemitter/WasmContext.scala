@@ -24,12 +24,13 @@ import org.scalajs.linker.backend.webassembly.{Types => watpe}
 
 import VarGen._
 import org.scalajs.ir.OriginalName
+import org.scalajs.ir.Trees
 
 final class WasmContext(
     classInfo: Map[ClassName, WasmContext.ClassInfo],
     reflectiveProxies: Map[MethodName, Int],
     val itablesLength: Int
-) {
+) extends GlobalKnowledge {
   import WasmContext._
 
   private val functionTypes = LinkedHashMap.empty[watpe.FunctionType, wanme.TypeID]
@@ -75,6 +76,44 @@ final class WasmContext(
 
   def getClassInfo(name: ClassName): ClassInfo =
     classInfo.getOrElse(name, throw new Error(s"Class not found: $name"))
+
+  // --- GlobalKnowledge API ---
+
+  def isInterface(className: ClassName): Boolean =
+    getClassInfo(className).isInterface
+
+  def getAllScalaClassFieldDefs(className: ClassName): List[Trees.AnyFieldDef] =
+    getClassInfo(className).allFieldDefs
+
+  def hasInstances(className: ClassName): Boolean =
+    getClassInfo(className).hasInstances
+
+  def getJSClassCaptureTypes(className: ClassName): Option[List[Type]] =
+    getClassInfo(className).jsClassCaptures.map(_.map(_.ptpe))
+
+  def getJSNativeLoadSpec(className: ClassName): Option[JSNativeLoadSpec] =
+    getClassInfo(className).jsNativeLoadSpec
+
+  def getJSNativeLoadSpec(className: ClassName, member: MethodName): JSNativeLoadSpec =
+    getClassInfo(className).jsNativeMembers(member)
+
+  def getStaticFieldMirrors(field: FieldName): List[String] =
+    getClassInfo(field.className).staticFieldMirrors(field)
+
+  def isAncestorOfHijackedClass(className: ClassName): Boolean =
+    getClassInfo(className).isAncestorOfHijackedClass
+
+  def resolveConcreteMethod(
+      className: ClassName,
+      methodName: MethodName
+  ): Option[ConcreteMethodInfo] = {
+    getClassInfo(className).resolvedMethodInfos.get(methodName)
+  }
+
+  def getItableIdx(className: ClassName): Int =
+    getItableIdx(getClassInfo(className))
+
+  // --- End GlobalKnowledege API ---
 
   def inferTypeFromTypeRef(typeRef: TypeRef): Type = typeRef match {
     case PrimRef(tpe) =>

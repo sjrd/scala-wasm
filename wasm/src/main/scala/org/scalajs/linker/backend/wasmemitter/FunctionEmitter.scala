@@ -257,13 +257,13 @@ object FunctionEmitter {
 }
 
 private class FunctionEmitter private (
-    ctx: WasmContext,
+    ctx0: WasmContext,
     val fb: FunctionBuilder,
     enclosingClassName: Option[ClassName],
     _newTargetStorage: Option[FunctionEmitter.VarStorage.Local],
     _receiverStorage: Option[FunctionEmitter.VarStorage.Local],
     paramsEnv: FunctionEmitter.Env
-) {
+)(implicit globalKnowledge: GlobalKnowledge) {
   import FunctionEmitter._
 
   private val instrs = fb
@@ -448,12 +448,11 @@ private class FunctionEmitter private (
     t.lhs match {
       case sel: Select =>
         val className = sel.field.name.className
-        val classInfo = ctx.getClassInfo(className)
 
         // For Select, the receiver can never be a hijacked class, so we can use genTreeAuto
         genTreeAuto(sel.qualifier)
 
-        if (!classInfo.hasInstances) {
+        if (!globalKnowledge.hasInstances(className)) {
           /* The field may not exist in that case, and we cannot look it up.
            * However we necessarily have a `null` receiver if we reach this
            * point, so we can trap as NPE.
@@ -475,8 +474,7 @@ private class FunctionEmitter private (
         instrs += wa.GlobalSet(globalName)
 
         // Update top-level export mirrors
-        val classInfo = ctx.getClassInfo(fieldName.className)
-        val mirrors = classInfo.staticFieldMirrors.getOrElse(fieldName, Nil)
+        val mirrors = globalKnowledge.getStaticFieldMirrors(fieldName)
         for (exportedName <- mirrors) {
           instrs += wa.GlobalGet(globalName)
           instrs += wa.Call(genFunctionID.forTopLevelExportSetter(exportedName))
@@ -525,7 +523,7 @@ private class FunctionEmitter private (
         instrs += wa.Call(genFunctionID.jsSuperSet)
 
       case assign: JSGlobalRef =>
-        instrs ++= ctx.getConstantStringInstr(assign.name)
+        instrs ++= ctx0.getConstantStringInstr(assign.name)
         genTree(t.rhs, AnyType)
         instrs += wa.Call(genFunctionID.jsGlobalRefSet)
 
@@ -570,12 +568,13 @@ private class FunctionEmitter private (
           case ArrayType(_)    => ObjectClass
           case tpe: RecordType => throw new AssertionError(s"Invalid receiver type $tpe")
         }
-        val receiverClassInfo = ctx.getClassInfo(receiverClassName)
 
         val canUseStaticallyResolved = {
-          receiverClassInfo.kind == ClassKind.HijackedClass ||
+          HijackedClasses.contains(receiverClassName) ||
           t.receiver.tpe.isInstanceOf[ArrayType] ||
-          receiverClassInfo.resolvedMethodInfos.get(t.method.name).exists(_.isEffectivelyFinal)
+          globalKnowledge
+            .resolveConcreteMethod(receiverClassName, t.method.name)
+            .exists(_.isEffectivelyFinal)
         }
         if (canUseStaticallyResolved) {
           genApplyStatically(
@@ -586,7 +585,7 @@ private class FunctionEmitter private (
             )
           )
         } else {
-          genApplyWithDispatch(t, receiverClassInfo)
+          genApplyWithDispatch(t, receiverClassName)
         }
     }
   }
@@ -596,8 +595,8 @@ private class FunctionEmitter private (
     val receiverLocalForDispatch =
       addSyntheticLocal(watpe.RefType.any)
 
-    val proxyId = ctx.getReflectiveProxyId(t.method.name)
-    val funcTypeName = ctx.tableFunctionType(t.method.name)
+    val proxyId = ctx0.getReflectiveProxyId(t.method.name)
+    val funcTypeName = ctx0.tableFunctionType(t.method.name)
 
     instrs.block(watpe.RefType.anyref) { done =>
       instrs.block(watpe.RefType.any) { labelNotOurObject =>
@@ -638,13 +637,8 @@ private class FunctionEmitter private (
     * In that case, there is always at least a vtable/itable-based dispatch. It may also contain
     * primitive-based dispatch if the receiver's type is an ancestor of a hijacked class.
     */
-  private def genApplyWithDispatch(
-      t: Apply,
-      receiverClassInfo: WasmContext.ClassInfo
-  ): Type = {
+  private def genApplyWithDispatch(t: Apply, receiverClassName: ClassName): Type = {
     implicit val pos: Position = t.pos
-
-    val receiverClassName = receiverClassInfo.name
 
     /* Similar to transformType(t.receiver.tpe), but:
      * - it is non-null,
@@ -655,7 +649,7 @@ private class FunctionEmitter private (
      * values and primitive values (that implement hijacked classes).
      */
     val refTypeForDispatch: watpe.RefType = {
-      if (receiverClassInfo.isInterface)
+      if (globalKnowledge.isInterface(receiverClassName))
         watpe.RefType(genTypeID.ObjectStruct)
       else
         watpe.RefType(genTypeID.forClass(receiverClassName))
@@ -685,7 +679,7 @@ private class FunctionEmitter private (
       instrs += wa.Call(funcName)
     }
 
-    if (!receiverClassInfo.hasInstances) {
+    if (!globalKnowledge.hasInstances(receiverClassName)) {
       /* If the target class info does not have any instance, the only possible
        * for the receiver is `null`. We can therefore immediately trap for an
        * NPE. It is important to short-cut this path because the reachability
@@ -695,12 +689,12 @@ private class FunctionEmitter private (
        */
       genTreeAuto(t.receiver)
       instrs += wa.Unreachable // NPE
-    } else if (!receiverClassInfo.isAncestorOfHijackedClass) {
+    } else if (!globalKnowledge.isAncestorOfHijackedClass(receiverClassName)) {
       // Standard dispatch codegen
       genReceiverNotNull()
       instrs += wa.LocalTee(receiverLocalForDispatch)
       genArgs(t.args, t.method.name)
-      genTableDispatch(receiverClassInfo, t.method.name, receiverLocalForDispatch)
+      genTableDispatch(receiverClassName, t.method.name, receiverLocalForDispatch)
     } else {
       /* Here the receiver's type is an ancestor of a hijacked class (or `any`,
        * which is treated as `jl.Object`).
@@ -724,9 +718,7 @@ private class FunctionEmitter private (
        * end $done
        */
 
-      assert(receiverClassInfo.kind != ClassKind.HijackedClass, receiverClassName)
-
-      val resultTyp = TypeTransformer.transformResultType(t.tpe)(ctx)
+      val resultTyp = TypeTransformer.transformResultType(t.tpe)
 
       instrs.block(resultTyp) { labelDone =>
         def pushArgs(argsLocals: List[wanme.LocalID]): Unit =
@@ -748,9 +740,9 @@ private class FunctionEmitter private (
             instrs += wa.LocalSet(receiverLocal)
             val argsLocals: List[wanme.LocalID] =
               for ((arg, typeRef) <- t.args.zip(t.method.name.paramTypeRefs)) yield {
-                val typ = ctx.inferTypeFromTypeRef(typeRef)
+                val typ = ctx0.inferTypeFromTypeRef(typeRef)
                 genTree(arg, typ)
-                val localName = addSyntheticLocal(TypeTransformer.transformType(typ)(ctx))
+                val localName = addSyntheticLocal(TypeTransformer.transformType(typ))
                 instrs += wa.LocalSet(localName)
                 localName
               }
@@ -761,7 +753,7 @@ private class FunctionEmitter private (
           instrs += wa.BrOnCastFail(labelNotOurObject, watpe.RefType.any, refTypeForDispatch)
           instrs += wa.LocalTee(receiverLocalForDispatch)
           pushArgs(argsLocals)
-          genTableDispatch(receiverClassInfo, t.method.name, receiverLocalForDispatch)
+          genTableDispatch(receiverClassName, t.method.name, receiverLocalForDispatch)
           instrs += wa.Br(labelDone)
 
           argsLocals
@@ -868,13 +860,13 @@ private class FunctionEmitter private (
     * `unreachable` instruction when appropriate.
     */
   def genTableDispatch(
-      receiverClassInfo: WasmContext.ClassInfo,
+      receiverClassName: ClassName,
       methodName: MethodName,
       receiverLocalForDispatch: wanme.LocalID
   ): Unit = {
     // Generates an itable-based dispatch.
     def genITableDispatch(): Unit = {
-      val itableIdx = ctx.getItableIdx(receiverClassInfo)
+      val itableIdx = globalKnowledge.getItableIdx(receiverClassName)
 
       instrs += wa.LocalGet(receiverLocalForDispatch)
       instrs += wa.StructGet(
@@ -885,18 +877,16 @@ private class FunctionEmitter private (
       )
       instrs += wa.I32Const(itableIdx)
       instrs += wa.ArrayGet(genTypeID.itables)
-      instrs += wa.RefCast(watpe.RefType(genTypeID.forITable(receiverClassInfo.name)))
+      instrs += wa.RefCast(watpe.RefType(genTypeID.forITable(receiverClassName)))
       instrs += wa.StructGet(
-        genTypeID.forITable(receiverClassInfo.name),
+        genTypeID.forITable(receiverClassName),
         genFieldID.forMethodTableEntry(methodName)
       )
-      instrs += wa.CallRef(ctx.tableFunctionType(methodName))
+      instrs += wa.CallRef(ctx0.tableFunctionType(methodName))
     }
 
     // Generates a vtable-based dispatch.
     def genVTableDispatch(): Unit = {
-      val receiverClassName = receiverClassInfo.name
-
       // // push args to the stacks
       // local.get $this ;; for accessing funcref
       // local.get $this ;; for accessing vtable
@@ -913,10 +903,10 @@ private class FunctionEmitter private (
         genTypeID.forVTable(receiverClassName),
         genFieldID.forMethodTableEntry(methodName)
       )
-      instrs += wa.CallRef(ctx.tableFunctionType(methodName))
+      instrs += wa.CallRef(ctx0.tableFunctionType(methodName))
     }
 
-    if (receiverClassInfo.isInterface)
+    if (globalKnowledge.isInterface(receiverClassName))
       genITableDispatch()
     else
       genVTableDispatch()
@@ -937,9 +927,8 @@ private class FunctionEmitter private (
       case _ =>
         val namespace = MemberNamespace.forNonStaticCall(t.flags)
         val targetClassName = {
-          val classInfo = ctx.getClassInfo(t.className)
-          if (!classInfo.isInterface && namespace == MemberNamespace.Public)
-            classInfo.resolvedMethodInfos(t.method.name).ownerClass
+          if (!globalKnowledge.isInterface(t.className) && namespace == MemberNamespace.Public)
+            globalKnowledge.resolveConcreteMethod(t.className, t.method.name).get.ownerClass
           else
             t.className
         }
@@ -988,7 +977,7 @@ private class FunctionEmitter private (
 
   private def genArgs(args: List[Tree], methodName: MethodName): Unit = {
     for ((arg, paramTypeRef) <- args.zip(methodName.paramTypeRefs)) {
-      val paramType = ctx.inferTypeFromTypeRef(paramTypeRef)
+      val paramType = ctx0.inferTypeFromTypeRef(paramTypeRef)
       genTree(arg, paramType)
     }
   }
@@ -1020,7 +1009,7 @@ private class FunctionEmitter private (
           instrs += wa.RefNull(watpe.HeapType.None)
 
         case v: StringLiteral =>
-          instrs ++= ctx.getConstantStringInstr(v.value)
+          instrs ++= ctx0.getConstantStringInstr(v.value)
 
         case v: ClassOf =>
           v.typeRef match {
@@ -1064,14 +1053,13 @@ private class FunctionEmitter private (
 
   private def genSelect(sel: Select): Type = {
     val className = sel.field.name.className
-    val classInfo = ctx.getClassInfo(className)
 
     // For Select, the receiver can never be a hijacked class, so we can use genTreeAuto
     genTreeAuto(sel.qualifier)
 
     markPosition(sel)
 
-    if (!classInfo.hasInstances) {
+    if (!globalKnowledge.hasInstances(className)) {
       /* The field may not exist in that case, and we cannot look it up.
        * However we necessarily have a `null` receiver if we reach this point,
        * so we can trap as NPE.
@@ -1246,7 +1234,7 @@ private class FunctionEmitter private (
        */
 
       val tpe = binary.tpe
-      val wasmTyp = TypeTransformer.transformType(tpe)(ctx)
+      val wasmTyp = TypeTransformer.transformType(tpe)
 
       val lhsLocal = addSyntheticLocal(wasmTyp)
       val rhsLocal = addSyntheticLocal(wasmTyp)
@@ -1463,8 +1451,6 @@ private class FunctionEmitter private (
         val receiverLocalForDispatch =
           addSyntheticLocal(watpe.RefType(genTypeID.ObjectStruct))
 
-        val objectClassInfo = ctx.getClassInfo(ObjectClass)
-
         if (!isAncestorOfHijackedClass) {
           /* Standard dispatch codegen, with dedicated null handling.
            *
@@ -1487,11 +1473,11 @@ private class FunctionEmitter private (
               markPosition(binary)
               instrs += wa.BrOnNull(labelIsNull)
               instrs += wa.LocalTee(receiverLocalForDispatch)
-              genTableDispatch(objectClassInfo, toStringMethodName, receiverLocalForDispatch)
+              genTableDispatch(ObjectClass, toStringMethodName, receiverLocalForDispatch)
               instrs += wa.BrOnNonNull(labelDone)
             }
 
-            instrs ++= ctx.getConstantStringInstr("null")
+            instrs ++= ctx0.getConstantStringInstr("null")
           }
         } else {
           /* Dispatch where the receiver can be a JS value.
@@ -1524,7 +1510,7 @@ private class FunctionEmitter private (
                 watpe.RefType(genTypeID.ObjectStruct)
               )
               instrs += wa.LocalTee(receiverLocalForDispatch)
-              genTableDispatch(objectClassInfo, toStringMethodName, receiverLocalForDispatch)
+              genTableDispatch(ObjectClass, toStringMethodName, receiverLocalForDispatch)
               instrs += wa.BrOnNonNull(labelDone)
               instrs += wa.RefNull(watpe.HeapType.Any)
             } // end block labelNotOurObject
@@ -1574,7 +1560,7 @@ private class FunctionEmitter private (
           instrs += wa.Call(genFunctionID.jsValueToStringForConcat) // for `null`
 
         case ClassType(className) =>
-          genWithDispatch(ctx.getClassInfo(className).isAncestorOfHijackedClass)
+          genWithDispatch(globalKnowledge.isAncestorOfHijackedClass(className))
 
         case AnyType =>
           genWithDispatch(isAncestorOfHijackedClass = true)
@@ -1663,9 +1649,7 @@ private class FunctionEmitter private (
           case Some(primType) =>
             genIsPrimType(primType)
           case None =>
-            val info = ctx.getClassInfo(testClassName)
-
-            if (info.isInterface)
+            if (globalKnowledge.isInterface(testClassName))
               instrs += wa.Call(genFunctionID.instanceTest(testClassName))
             else
               instrs += wa.RefTest(watpe.RefType(genTypeID.forClass(testClassName)))
@@ -1673,11 +1657,8 @@ private class FunctionEmitter private (
 
       case ArrayType(arrayTypeRef) =>
         arrayTypeRef match {
-          case ArrayTypeRef(
-                ClassRef(ObjectClass) | _: PrimRef,
-                1
-              ) =>
-            // For primitive arrays and exactly Array[Object], a wa.REF_TEST is enough
+          case ArrayTypeRef(ClassRef(ObjectClass) | _: PrimRef, 1) =>
+            // For primitive arrays and exactly Array[Object], a wa.RefTest is enough
             val structTypeName = genTypeID.forArrayClass(arrayTypeRef)
             instrs += wa.RefTest(watpe.RefType(structTypeName))
 
@@ -1738,8 +1719,8 @@ private class FunctionEmitter private (
     } else {
       // By IR checker rules, targetTpe is none of NothingType, NullType, NoType or RecordType
 
-      val sourceWasmType = TypeTransformer.transformType(sourceTpe)(ctx)
-      val targetWasmType = TypeTransformer.transformType(targetTpe)(ctx)
+      val sourceWasmType = TypeTransformer.transformType(sourceTpe)
+      val targetWasmType = TypeTransformer.transformType(targetTpe)
 
       if (sourceWasmType == targetWasmType) {
         /* Common case where no cast is necessary at the Wasm level.
@@ -1798,7 +1779,7 @@ private class FunctionEmitter private (
               if (targetTpe == CharType) SpecialNames.CharBoxClass
               else SpecialNames.LongBoxClass
             val fieldName = FieldName(boxClass, SpecialNames.valueFieldSimpleName)
-            val resultType = TypeTransformer.transformType(targetTpe)(ctx)
+            val resultType = TypeTransformer.transformType(targetTpe)
 
             instrs.block(Sig(List(watpe.RefType.anyref), List(resultType))) { doneLabel =>
               instrs.block(Sig(List(watpe.RefType.anyref), Nil)) { isNullLabel =>
@@ -1830,7 +1811,7 @@ private class FunctionEmitter private (
 
     val needHijackedClassDispatch = tree.expr.tpe match {
       case ClassType(className) =>
-        ctx.getClassInfo(className).isAncestorOfHijackedClass
+        globalKnowledge.isAncestorOfHijackedClass(className)
       case ArrayType(_) | NothingType | NullType =>
         false
       case _ =>
@@ -1901,7 +1882,7 @@ private class FunctionEmitter private (
   }
 
   private def genIf(t: If, expectedType: Type): Type = {
-    val ty = TypeTransformer.transformResultType(expectedType)(ctx)
+    val ty = TypeTransformer.transformResultType(expectedType)
     genTree(t.cond, BooleanType)
 
     markPosition(t)
@@ -1999,7 +1980,7 @@ private class FunctionEmitter private (
   }
 
   private def genTryCatch(t: TryCatch, expectedType: Type): Type = {
-    val resultType = TypeTransformer.transformResultType(expectedType)(ctx)
+    val resultType = TypeTransformer.transformResultType(expectedType)
 
     if (UseLegacyExceptionsForTryCatch) {
       markPosition(t)
@@ -2066,7 +2047,7 @@ private class FunctionEmitter private (
       case (stat @ VarDef(name, originalName, vtpe, _, rhs)) :: rest =>
         genTree(rhs, vtpe)
         markPosition(stat)
-        withNewLocal(name.name, originalName, TypeTransformer.transformType(vtpe)(ctx)) { local =>
+        withNewLocal(name.name, originalName, TypeTransformer.transformType(vtpe)) { local =>
           instrs += wa.LocalSet(local)
           genBlockStats(rest)(inner)
         }
@@ -2111,7 +2092,7 @@ private class FunctionEmitter private (
       boxClassName: ClassName
   ): Type = {
     // `primTyp` is `i32` for `char` (containing a `u16` value) or `i64` for `long`.
-    val primTyp = TypeTransformer.transformType(primType)(ctx)
+    val primTyp = TypeTransformer.transformType(primType)
     val primLocal = addSyntheticLocal(primTyp)
 
     /* We use a direct `StructNew` instead of the logical call to `newDefault`
@@ -2143,7 +2124,7 @@ private class FunctionEmitter private (
     val nonNullThrowableTyp = watpe.RefType(genTypeID.ThrowableStruct)
 
     val jsExceptionTyp =
-      TypeTransformer.transformClassType(SpecialNames.JSExceptionClass)(ctx).toNonNullable
+      TypeTransformer.transformClassType(SpecialNames.JSExceptionClass).toNonNullable
 
     instrs.block(nonNullThrowableTyp) { doneLabel =>
       genTree(tree.expr, AnyType)
@@ -2252,16 +2233,16 @@ private class FunctionEmitter private (
 
   private def genLoadJSConstructor(tree: LoadJSConstructor): Type = {
     markPosition(tree)
-    SWasmGen.genLoadJSConstructor(instrs, tree.className)(ctx)
+    SWasmGen.genLoadJSConstructor(instrs, tree.className)(ctx0, globalKnowledge)
     AnyType
   }
 
   private def genLoadJSModule(tree: LoadJSModule): Type = {
     markPosition(tree)
 
-    ctx.getClassInfo(tree.className).jsNativeLoadSpec match {
+    globalKnowledge.getJSNativeLoadSpec(tree.className) match {
       case Some(loadSpec) =>
-        genLoadJSFromSpec(instrs, loadSpec)(ctx)
+        genLoadJSFromSpec(instrs, loadSpec)(ctx0)
       case None =>
         // This is a non-native JS module
         instrs += wa.Call(genFunctionID.loadModule(tree.className))
@@ -2271,13 +2252,8 @@ private class FunctionEmitter private (
   }
 
   private def genSelectJSNativeMember(tree: SelectJSNativeMember): Type = {
-    val info = ctx.getClassInfo(tree.className)
-    val jsNativeLoadSpec = info.jsNativeMembers.getOrElse(
-      tree.member.name, {
-        throw new AssertionError(s"Found $tree for non-existing JS native member at ${tree.pos}")
-      }
-    )
-    genLoadJSFromSpec(instrs, jsNativeLoadSpec)(ctx)
+    val jsNativeLoadSpec = globalKnowledge.getJSNativeLoadSpec(tree.className, tree.member.name)
+    genLoadJSFromSpec(instrs, jsNativeLoadSpec)(ctx0)
     AnyType
   }
 
@@ -2349,14 +2325,14 @@ private class FunctionEmitter private (
 
   private def genJSGlobalRef(tree: JSGlobalRef): Type = {
     markPosition(tree)
-    instrs ++= ctx.getConstantStringInstr(tree.name)
+    instrs ++= ctx0.getConstantStringInstr(tree.name)
     instrs += wa.Call(genFunctionID.jsGlobalRefGet)
     AnyType
   }
 
   private def genJSTypeOfGlobalRef(tree: JSTypeOfGlobalRef): Type = {
     markPosition(tree)
-    instrs ++= ctx.getConstantStringInstr(tree.globalRef.name)
+    instrs ++= ctx0.getConstantStringInstr(tree.globalRef.name)
     instrs += wa.Call(genFunctionID.jsGlobalRefTypeof)
     AnyType
   }
@@ -2509,7 +2485,7 @@ private class FunctionEmitter private (
             // a primitive array type always has the correct
             ()
           case _ =>
-            TypeTransformer.transformType(t.tpe)(ctx) match {
+            TypeTransformer.transformType(t.tpe) match {
               case watpe.RefType.anyref =>
                 // nothing to do
                 ()
@@ -2561,11 +2537,10 @@ private class FunctionEmitter private (
 
   private def genClosure(tree: Closure): Type = {
     implicit val pos = tree.pos
-    implicit val ctx = this.ctx
 
     val hasThis = !tree.arrow
     val hasRestParam = tree.restParam.isDefined
-    val dataStructTypeName = ctx.getClosureDataStructType(tree.captureParams.map(_.ptpe))
+    val dataStructTypeName = ctx0.getClosureDataStructType(tree.captureParams.map(_.ptpe))
 
     // Define the function where captures are reified as a `__captureData` argument.
     val closureFuncOrigName = genInnerFuncOriginalName()
@@ -2580,12 +2555,12 @@ private class FunctionEmitter private (
       tree.restParam,
       tree.body,
       resultType = AnyType
-    )
+    )(ctx0, pos)
 
     markPosition(tree)
 
     // Put a reference to the function on the stack
-    instrs += ctx.refFuncWithDeclaration(closureFuncID)
+    instrs += ctx0.refFuncWithDeclaration(closureFuncID)
 
     // Evaluate the capture values and instantiate the capture data struct
     for ((param, value) <- tree.captureParams.zip(tree.captureValues))
@@ -2612,7 +2587,7 @@ private class FunctionEmitter private (
   }
 
   private def genClone(t: Clone): Type = {
-    val expr = addSyntheticLocal(TypeTransformer.transformType(t.expr.tpe)(ctx))
+    val expr = addSyntheticLocal(TypeTransformer.transformType(t.expr.tpe))
 
     genTree(t.expr, ClassType(CloneableClass))
 
@@ -2630,8 +2605,8 @@ private class FunctionEmitter private (
 
     t.tpe match {
       case ClassType(className) =>
-        val info = ctx.getClassInfo(className)
-        if (!info.isInterface) // if it's interface, no need to cast from j.l.Object
+        // if it is an interface, thre is no need to cast from j.l.Object
+        if (!globalKnowledge.isInterface(className))
           instrs += wa.RefCast(watpe.RefType(genTypeID.forClass(className)))
       case _ =>
         throw new IllegalArgumentException(
@@ -2643,7 +2618,7 @@ private class FunctionEmitter private (
 
   private def genMatch(tree: Match, expectedType: Type): Type = {
     val Match(selector, cases, defaultBody) = tree
-    val selectorLocal = addSyntheticLocal(TypeTransformer.transformType(selector.tpe)(ctx))
+    val selectorLocal = addSyntheticLocal(TypeTransformer.transformType(selector.tpe))
 
     genTreeAuto(selector)
 
@@ -2651,7 +2626,7 @@ private class FunctionEmitter private (
 
     instrs += wa.LocalSet(selectorLocal)
 
-    instrs.block(TypeTransformer.transformResultType(expectedType)(ctx)) { doneLabel =>
+    instrs.block(TypeTransformer.transformResultType(expectedType)) { doneLabel =>
       instrs.block() { defaultLabel =>
         val caseLabels = cases.map(c => c._1 -> instrs.genLabel())
         for (caseLabel <- caseLabels)
@@ -2670,7 +2645,7 @@ private class FunctionEmitter private (
               instrs += wa.I32Eq
               instrs += wa.BrIf(label)
             case StringLiteral(value) =>
-              instrs ++= ctx.getConstantStringInstr(value)
+              instrs ++= ctx0.getConstantStringInstr(value)
               instrs += wa.Call(genFunctionID.is)
               instrs += wa.BrIf(label)
             case Null() =>
@@ -2697,15 +2672,14 @@ private class FunctionEmitter private (
   }
 
   private def genCreateJSClass(tree: CreateJSClass): Type = {
-    val classInfo = ctx.getClassInfo(tree.className)
-    val jsClassCaptures = classInfo.jsClassCaptures.getOrElse {
+    val jsClassCaptureTypes = globalKnowledge.getJSClassCaptureTypes(tree.className).getOrElse {
       throw new AssertionError(
         s"Illegal CreateJSClass of top-level class ${tree.className.nameString}"
       )
     }
 
-    for ((captureValue, captureParam) <- tree.captureValues.zip(jsClassCaptures))
-      genTree(captureValue, captureParam.ptpe)
+    for ((captureValue, captureParamType) <- tree.captureValues.zip(jsClassCaptureTypes))
+      genTree(captureValue, captureParamType)
 
     markPosition(tree)
 
@@ -3035,7 +3009,7 @@ private class FunctionEmitter private (
       def requireCrossInfo(): (Int, List[wanme.LocalID], wanme.LabelID) = {
         if (destinationTag == 0) {
           destinationTag = allocateDestinationTag()
-          val resultTypes = TypeTransformer.transformResultType(expectedType)(ctx)
+          val resultTypes = TypeTransformer.transformResultType(expectedType)
           resultLocals = resultTypes.map(addSyntheticLocal(_))
           crossLabel = instrs.genLabel()
         }
@@ -3047,7 +3021,7 @@ private class FunctionEmitter private (
     def genLabeled(t: Labeled, expectedType: Type): Type = {
       val entry = new LabeledEntry(currentUnwindingStackDepth, t.label.name, expectedType)
 
-      val ty = TypeTransformer.transformResultType(expectedType)(ctx)
+      val ty = TypeTransformer.transformResultType(expectedType)
 
       markPosition(t)
 
@@ -3122,7 +3096,7 @@ private class FunctionEmitter private (
     def genTryFinally(t: TryFinally, expectedType: Type): Type = {
       val entry = new TryFinallyEntry(currentUnwindingStackDepth)
 
-      val resultType = TypeTransformer.transformResultType(expectedType)(ctx)
+      val resultType = TypeTransformer.transformResultType(expectedType)
       val resultLocals = resultType.map(addSyntheticLocal(_))
 
       markPosition(t)
