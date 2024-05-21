@@ -48,7 +48,7 @@ object FunctionEmitter {
       restParam: Option[ParamDef],
       body: Tree,
       resultType: Type
-  )(implicit ctx: WasmContext, pos: Position): Unit = {
+  )(implicit ctx: WasmContext, globalKnowledge: GlobalKnowledge, pos: Position): Unit = {
     val emitter = prepareEmitter(
       functionName,
       originalName,
@@ -71,7 +71,7 @@ object FunctionEmitter {
       enclosingClassName: ClassName,
       jsClassCaptures: List[ParamDef],
       ctor: JSConstructorDef
-  )(implicit ctx: WasmContext): Unit = {
+  )(implicit ctx: WasmContext, globalKnowledge: GlobalKnowledge): Unit = {
     implicit val pos = ctor.pos
 
     val allCtorParams = ctor.args ::: ctor.restParam.toList
@@ -154,7 +154,7 @@ object FunctionEmitter {
       receiverTyp: Option[watpe.Type],
       paramDefs: List[ParamDef],
       resultTypes: List[watpe.Type]
-  )(implicit ctx: WasmContext, pos: Position): FunctionEmitter = {
+  )(implicit ctx: WasmContext, globalKnowledge: GlobalKnowledge, pos: Position): FunctionEmitter = {
     val fb = new FunctionBuilder(ctx.moduleBuilder, functionName, originalName, pos)
 
     def addCaptureLikeParamListAndMakeEnv(
@@ -569,12 +569,15 @@ private class FunctionEmitter private (
           case tpe: RecordType => throw new AssertionError(s"Invalid receiver type $tpe")
         }
 
+        def hasEffectivelyFinalConcreteImplementation: Boolean = {
+          globalKnowledge.resolveConcreteMethod(receiverClassName, t.method.name)
+            .exists(globalKnowledge.isMethodEffectivelyFinal(_, t.method.name))
+        }
+
         val canUseStaticallyResolved = {
           HijackedClasses.contains(receiverClassName) ||
           t.receiver.tpe.isInstanceOf[ArrayType] ||
-          globalKnowledge
-            .resolveConcreteMethod(receiverClassName, t.method.name)
-            .exists(_.isEffectivelyFinal)
+          hasEffectivelyFinalConcreteImplementation
         }
         if (canUseStaticallyResolved) {
           genApplyStatically(
@@ -595,7 +598,7 @@ private class FunctionEmitter private (
     val receiverLocalForDispatch =
       addSyntheticLocal(watpe.RefType.any)
 
-    val proxyId = ctx0.getReflectiveProxyId(t.method.name)
+    val proxyId = globalKnowledge.getReflectiveProxyId(t.method.name)
     val funcTypeName = ctx0.tableFunctionType(t.method.name)
 
     instrs.block(watpe.RefType.anyref) { done =>
@@ -928,7 +931,7 @@ private class FunctionEmitter private (
         val namespace = MemberNamespace.forNonStaticCall(t.flags)
         val targetClassName = {
           if (!globalKnowledge.isInterface(t.className) && namespace == MemberNamespace.Public)
-            globalKnowledge.resolveConcreteMethod(t.className, t.method.name).get.ownerClass
+            globalKnowledge.resolveConcreteMethod(t.className, t.method.name).get
           else
             t.className
         }
@@ -2555,7 +2558,7 @@ private class FunctionEmitter private (
       tree.restParam,
       tree.body,
       resultType = AnyType
-    )(ctx0, pos)
+    )(ctx0, globalKnowledge, pos)
 
     markPosition(tree)
 

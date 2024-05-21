@@ -65,7 +65,7 @@ object CoreWasmLib {
     * This notably includes the `typeData` definitions, since the vtable of `jl.Object` is a subtype
     * of `typeData`.
     */
-  def genPreClasses()(implicit ctx: WasmContext): Unit = {
+  def genPreClasses()(implicit ctx: WasmContext, globalKnowledge: GlobalKnowledge): Unit = {
     genPreMainRecTypeDefinitions()
     ctx.moduleBuilder.addRecTypeBuilder(ctx.mainRecType)
     genCoreTypesInRecType()
@@ -84,7 +84,7 @@ object CoreWasmLib {
     * This notably includes the array class definitions, since they are subtypes of the `jl.Object`
     * struct type.
     */
-  def genPostClasses()(implicit ctx: WasmContext): Unit = {
+  def genPostClasses()(implicit ctx: WasmContext, globalKnowledge: GlobalKnowledge): Unit = {
     genArrayClassTypes()
 
     genBoxedZeroGlobals()
@@ -340,10 +340,10 @@ object CoreWasmLib {
     }
   }
 
-  private def genArrayClassGlobals()(implicit ctx: WasmContext): Unit = {
+  private def genArrayClassGlobals()(implicit ctx: WasmContext, globalKnowledge: GlobalKnowledge): Unit = {
     // Common itable global for all array classes
     val itablesInit = List(
-      I32Const(ctx.itablesLength),
+      I32Const(globalKnowledge.getItablesLength),
       ArrayNewDefault(genTypeID.itables)
     )
     ctx.addGlobal(
@@ -551,7 +551,7 @@ object CoreWasmLib {
   }
 
   /** Generates all the non-type definitions of the core Wasm lib. */
-  private def genHelperDefinitions()(implicit ctx: WasmContext): Unit = {
+  private def genHelperDefinitions()(implicit ctx: WasmContext, globalKnowledge: GlobalKnowledge): Unit = {
     genStringLiteral()
     genCreateStringFromData()
     genTypeDataName()
@@ -967,7 +967,7 @@ object CoreWasmLib {
     * Returns the typeData/vtable of an array with `dims` dimensions over the given typeData. `dims`
     * must be be strictly positive.
     */
-  private def genArrayTypeData()(implicit ctx: WasmContext): Unit = {
+  private def genArrayTypeData()(implicit ctx: WasmContext, globalKnowledge: GlobalKnowledge): Unit = {
     val typeDataType = RefType(genTypeID.typeData)
     val objectVTableType = RefType(genTypeID.ObjectVTable)
 
@@ -977,7 +977,7 @@ object CoreWasmLib {
      */
     val strictAncestors =
       List(CloneableClass, SerializableClass, ObjectClass)
-        .filter(name => ctx.getClassInfoOption(name).exists(_.hasRuntimeTypeInfo))
+        .filter(name => globalKnowledge.hasRuntimeTypeInfo(name))
 
     val fb = newFunctionBuilder(genFunctionID.arrayTypeData)
     val typeDataParam = fb.addParam("typeData", typeDataType)
@@ -1062,9 +1062,9 @@ object CoreWasmLib {
         // reflectiveProxies
         instrs += ArrayNewFixed(genTypeID.reflectiveProxies, 0) // TODO
 
-        val objectClassInfo = ctx.getClassInfo(ObjectClass)
-        instrs ++= objectClassInfo.tableEntries.map { methodName =>
-          ctx.refFuncWithDeclaration(objectClassInfo.resolvedMethodInfos(methodName).tableEntryName)
+        val tableEntries = globalKnowledge.getTableEntries(ObjectClass)
+        instrs ++= tableEntries.map { methodName =>
+          ctx.refFuncWithDeclaration(genFunctionID.forTableEntry(ObjectClass, methodName))
         }
         instrs += StructNew(genTypeID.ObjectVTable)
         instrs += LocalTee(arrayTypeDataLocal)

@@ -10,10 +10,213 @@ import org.scalajs.ir.{ClassKind, Traversers}
 import org.scalajs.linker.standard.{LinkedClass, LinkedTopLevelExport}
 
 import EmbeddedConstants._
+import GlobalKnowledge.ConcreteMethodInfo
 import WasmContext._
 
-object Preprocessor {
-  def preprocess(classes: List[LinkedClass], tles: List[LinkedTopLevelExport]): WasmContext = {
+final class KnowledgeGuardian(
+    classInfo: Map[ClassName, KnowledgeGuardian.ClassInfo],
+    reflectiveProxies: Map[MethodName, Int],
+    itablesLength: Int
+) extends GlobalKnowledge {
+  import KnowledgeGuardian._
+
+  def isInterface(className: ClassName): Boolean =
+    classInfo(className).isInterface
+
+  def isJSType(className: ClassName): Boolean =
+    classInfo(className).kind.isJSType
+
+  def getAllScalaClassFieldDefs(className: ClassName): List[FieldDef] =
+    classInfo(className).allFieldDefs
+
+  def hasInstances(className: ClassName): Boolean =
+    classInfo(className).hasInstances
+
+  def hasRuntimeTypeInfo(className: ClassName): Boolean =
+    classInfo.get(className).exists(_.hasRuntimeTypeInfo)
+
+  def getJSClassCaptureTypes(className: ClassName): Option[List[Type]] =
+    classInfo(className).jsClassCaptures.map(_.map(_.ptpe))
+
+  def getJSNativeLoadSpec(className: ClassName): Option[JSNativeLoadSpec] =
+    classInfo(className).jsNativeLoadSpec
+
+  def getJSNativeLoadSpec(className: ClassName, member: MethodName): JSNativeLoadSpec =
+    classInfo(className).jsNativeMembers(member)
+
+  def getStaticFieldMirrors(field: FieldName): List[String] =
+    classInfo(field.className).staticFieldMirrors(field)
+
+  def isAncestorOfHijackedClass(className: ClassName): Boolean =
+    classInfo(className).isAncestorOfHijackedClass
+
+  def resolveConcreteMethod(className: ClassName, methodName: MethodName): Option[ClassName] =
+    classInfo(className).resolvedMethodInfos.get(methodName).map(_.ownerClass)
+
+  /** Is the given concrete method effectively final, i.e., never overridden? */
+  def isMethodEffectivelyFinal(className: ClassName, methodName: MethodName): Boolean =
+    classInfo(className).resolvedMethodInfos(methodName).isEffectivelyFinal
+
+  /** The number of elements in itables arrays. */
+  def getItablesLength: Int =
+    itablesLength
+
+  def getItableIdx(className: ClassName): Int =
+    classInfo(className).itableIdx
+
+  def getReflectiveProxyId(name: MethodName): Int =
+    reflectiveProxies.getOrElse(name, -1)
+
+  def getTableEntries(className: ClassName): List[MethodName] =
+    classInfo(className).tableEntries
+
+  // Not part of GlobalKnowledge API
+
+  def getClassInfo(className: ClassName): ClassInfo =
+    classInfo(className)
+
+  def getClassInfoOption(className: ClassName): Option[ClassInfo] =
+    classInfo.get(className)
+}
+
+object KnowledgeGuardian {
+  final class ClassInfo(
+      val name: ClassName,
+      val kind: ClassKind,
+      val jsClassCaptures: Option[List[ParamDef]],
+      classConcretePublicMethodNames: List[MethodName],
+      val allFieldDefs: List[FieldDef],
+      superClass: Option[ClassInfo],
+      val classImplementsAnyInterface: Boolean,
+      private var _hasInstances: Boolean,
+      val isAbstract: Boolean,
+      val hasRuntimeTypeInfo: Boolean,
+      val jsNativeLoadSpec: Option[JSNativeLoadSpec],
+      val jsNativeMembers: Map[MethodName, JSNativeLoadSpec],
+      val staticFieldMirrors: Map[FieldName, List[String]],
+      private var _itableIdx: Int
+  ) {
+    val resolvedMethodInfos: Map[MethodName, ConcreteMethodInfo] = {
+      if (kind.isClass || kind == ClassKind.HijackedClass) {
+        val inherited: Map[MethodName, ConcreteMethodInfo] = superClass match {
+          case Some(superClass) => superClass.resolvedMethodInfos
+          case None             => Map.empty
+        }
+
+        for (methodName <- classConcretePublicMethodNames)
+          inherited.get(methodName).foreach(_.markOverridden())
+
+        classConcretePublicMethodNames.foldLeft(inherited) { (prev, methodName) =>
+          prev.updated(methodName, new ConcreteMethodInfo(name, methodName))
+        }
+      } else {
+        Map.empty
+      }
+    }
+
+    private val methodsCalledDynamically = mutable.HashSet.empty[MethodName]
+
+    /** For a class or interface, its table entries in definition order. */
+    private var _tableEntries: List[MethodName] = null
+
+    // See caller in Preprocessor.preprocess
+    def setHasInstances(): Unit =
+      _hasInstances = true
+
+    def hasInstances: Boolean = _hasInstances
+
+    def setItableIdx(idx: Int): Unit = _itableIdx = idx
+
+    /** Returns the index of this interface's itable in the classes' interface tables.
+      */
+    def itableIdx: Int = _itableIdx
+
+    private var _specialInstanceTypes: Int = 0
+
+    def addSpecialInstanceType(jsValueType: Int): Unit =
+      _specialInstanceTypes |= (1 << jsValueType)
+
+    /** A bitset of the `jsValueType`s corresponding to hijacked classes that extend this class.
+      *
+      * This value is used for instance tests against this class. A JS value `x` is an instance of
+      * this type iff `jsValueType(x)` is a member of this bitset. Because of how a bitset works,
+      * this means testing the following formula:
+      *
+      * {{{
+      * ((1 << jsValueType(x)) & specialInstanceTypes) != 0
+      * }}}
+      *
+      * For example, if this class is `Comparable`, we want the bitset to contain the values for
+      * `boolean`, `string` and `number` (but not `undefined`), because `jl.Boolean`, `jl.String`
+      * and `jl.Double` implement `Comparable`.
+      *
+      * This field is initialized with 0, and augmented during preprocessing by calls to
+      * `addSpecialInstanceType`.
+      *
+      * This technique is used both for static `isInstanceOf` tests as well as reflective tests
+      * through `Class.isInstance`. For the latter, this value is stored in
+      * `typeData.specialInstanceTypes`. For the former, it is embedded as a constant in the
+      * generated code.
+      *
+      * See the `isInstance` and `genInstanceTest` helpers.
+      *
+      * Special cases: this value remains 0 for all the numeric hijacked classes except `jl.Double`,
+      * since `jsValueType(x) == JSValueTypeNumber` is not enough to deduce that
+      * `x.isInstanceOf[Int]`, for example.
+      */
+    def specialInstanceTypes: Int = _specialInstanceTypes
+
+    /** Is this class an ancestor of any hijacked class?
+      *
+      * This includes but is not limited to the hijacked classes themselves, as well as `jl.Object`.
+      */
+    def isAncestorOfHijackedClass: Boolean =
+      specialInstanceTypes != 0 || kind == ClassKind.HijackedClass
+
+    def isInterface = kind == ClassKind.Interface
+
+    def registerDynamicCall(methodName: MethodName): Unit =
+      methodsCalledDynamically += methodName
+
+    def buildMethodTable(): Unit = {
+      if (_tableEntries != null)
+        throw new IllegalStateException(s"Duplicate call to buildMethodTable() for $name")
+
+      kind match {
+        case ClassKind.Class | ClassKind.ModuleClass | ClassKind.HijackedClass =>
+          val superTableEntries = superClass.fold[List[MethodName]](Nil)(_.tableEntries)
+          val superTableEntrySet = superTableEntries.toSet
+
+          /* When computing the table entries to add for this class, exclude:
+           * - methods that are already in the super class' table entries, and
+           * - methods that are effectively final, since they will always be
+           *   statically resolved instead of using the table dispatch.
+           */
+          val newTableEntries = methodsCalledDynamically.toList
+            .filter(!superTableEntrySet.contains(_))
+            .filterNot(m => resolvedMethodInfos.get(m).exists(_.isEffectivelyFinal))
+            .sorted // for stability
+
+          _tableEntries = superTableEntries ::: newTableEntries
+
+        case ClassKind.Interface =>
+          _tableEntries = methodsCalledDynamically.toList.sorted // for stability
+
+        case _ =>
+          _tableEntries = Nil
+      }
+
+      methodsCalledDynamically.clear() // gc
+    }
+
+    def tableEntries: List[MethodName] = {
+      if (_tableEntries == null)
+        throw new IllegalStateException(s"Table not yet built for $name")
+      _tableEntries
+    }
+  }
+
+  def preprocess(classes: List[LinkedClass], tles: List[LinkedTopLevelExport]): KnowledgeGuardian = {
     val staticFieldMirrors = computeStaticFieldMirrors(tles)
 
     val classInfosBuilder = mutable.HashMap.empty[ClassName, ClassInfo]
@@ -50,7 +253,7 @@ object Preprocessor {
     }
     val itablesLength = assignBuckets(classes, classInfos)
 
-    new WasmContext(classInfos, reflectiveProxyIDs, itablesLength)
+    new KnowledgeGuardian(classInfos, reflectiveProxyIDs, itablesLength)
   }
 
   private def computeStaticFieldMirrors(

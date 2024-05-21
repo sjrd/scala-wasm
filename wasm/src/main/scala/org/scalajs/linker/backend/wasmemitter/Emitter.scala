@@ -41,8 +41,11 @@ final class Emitter(config: Emitter.Config) {
       else a.className.compareTo(b.className) < 0
     }
 
-    implicit val ctx: WasmContext =
-      Preprocessor.preprocess(sortedClasses, module.topLevelExports)
+    val knowledgeGuardian: KnowledgeGuardian =
+      KnowledgeGuardian.preprocess(sortedClasses, module.topLevelExports)
+
+    implicit val globalKnowledge: GlobalKnowledge = knowledgeGuardian
+    implicit val ctx: WasmContext = new WasmContext()
 
     // Sort for stability
     val allImportedModules: List[String] = module.externalDependencies.toList.sorted
@@ -70,6 +73,7 @@ final class Emitter(config: Emitter.Config) {
     CoreWasmLib.genPostClasses()
 
     complete(
+      knowledgeGuardian,
       sortedClasses,
       module.initializers.toList,
       module.topLevelExports
@@ -85,6 +89,7 @@ final class Emitter(config: Emitter.Config) {
   }
 
   private def complete(
+      knowledgeGuardian: KnowledgeGuardian,
       sortedClasses: List[LinkedClass],
       moduleInitializers: List[ModuleInitializer.Initializer],
       topLevelExportDefs: List[LinkedTopLevelExport]
@@ -126,11 +131,12 @@ final class Emitter(config: Emitter.Config) {
       )
     )
 
-    genStartFunction(sortedClasses, moduleInitializers, topLevelExportDefs)
+    genStartFunction(knowledgeGuardian, sortedClasses, moduleInitializers, topLevelExportDefs)
     genDeclarativeElements()
   }
 
   private def genStartFunction(
+      knowledgeGuardian: KnowledgeGuardian,
       sortedClasses: List[LinkedClass],
       moduleInitializers: List[ModuleInitializer.Initializer],
       topLevelExportDefs: List[LinkedTopLevelExport]
@@ -146,16 +152,15 @@ final class Emitter(config: Emitter.Config) {
     // Initialize itables
     for (clazz <- sortedClasses if clazz.kind.isClass && clazz.hasDirectInstances) {
       val className = clazz.className
-      val classInfo = ctx.getClassInfo(className)
+      val classInfo = knowledgeGuardian.getClassInfo(className)
 
       if (classInfo.classImplementsAnyInterface) {
-        val interfaces = clazz.ancestors.map(ctx.getClassInfo(_)).filter(_.isInterface)
+        val interfaces = clazz.ancestors.map(knowledgeGuardian.getClassInfo(_)).filter(_.isInterface)
         val resolvedMethodInfos = classInfo.resolvedMethodInfos
 
         interfaces.foreach { iface =>
-          val idx = ctx.getItableIdx(iface)
           instrs += wa.GlobalGet(genGlobalID.forITable(className))
-          instrs += wa.I32Const(idx)
+          instrs += wa.I32Const(iface.itableIdx)
 
           for (method <- iface.tableEntries)
             instrs += ctx.refFuncWithDeclaration(resolvedMethodInfos(method).tableEntryName)
@@ -168,15 +173,15 @@ final class Emitter(config: Emitter.Config) {
     locally {
       // For array classes, resolve methods in jl.Object
       val globalName = genGlobalID.arrayClassITable
-      val resolvedMethodInfos = ctx.getClassInfo(ObjectClass).resolvedMethodInfos
+      val resolvedMethodInfos = knowledgeGuardian.getClassInfo(ObjectClass).resolvedMethodInfos
 
       for {
         interfaceName <- List(SerializableClass, CloneableClass)
         // Use getClassInfoOption in case the reachability analysis got rid of those interfaces
-        interfaceInfo <- ctx.getClassInfoOption(interfaceName)
+        interfaceInfo <- knowledgeGuardian.getClassInfoOption(interfaceName)
       } {
         instrs += wa.GlobalGet(globalName)
-        instrs += wa.I32Const(ctx.getItableIdx(interfaceInfo))
+        instrs += wa.I32Const(interfaceInfo.itableIdx)
 
         for (method <- interfaceInfo.tableEntries)
           instrs += ctx.refFuncWithDeclaration(resolvedMethodInfos(method).tableEntryName)
